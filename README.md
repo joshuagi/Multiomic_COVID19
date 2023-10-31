@@ -6,7 +6,7 @@ R software is needed to run the code.
 
 Data are available from the lead author upon reasonable request.
 
-The R pipeline “20201204 Multiomic Factor analysis.Rmd” contains code to reproduce the figures and analyses below, as well as several ancillary analyses to evaluate the quality of the multi-omic factor model. See also "20201204 Multiomic Factor analysis.html" for the report rendered from the .rmd file.\
+The R pipeline “20201204 Multiomic Factor analysis.Rmd” contains code to reproduce the figures and analyses below, as well as several ancillary analyses to evaluate the quality of the multi-omic factor model. See also "20201204 Multiomic Factor analysis.html" for the report rendered from the .rmd file.
 
 Figure 1E: Top factors discriminating Mild, Moderate, and Severe COVID-19\
 Figure S3: Multi-omic factor analysis (MOFA) identifies shared sources of variability across single-cell cytometry and proteomic data that are associated with COVID-19 severity\
