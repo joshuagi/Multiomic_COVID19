@@ -1,0 +1,851 @@
+---
+title: "Muco Manuscript figures"
+output:
+  html_document:
+    df_print: paged
+    toc: TRUE
+    theme: united
+date: "June 2020"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(dplyr)
+library(gridExtra)
+library(pheatmap)
+library(plyr)
+library(data.table)
+library(openxlsx)
+library(cowplot)
+library(stringr)
+library(corrplot)
+library(glmnet)
+library(ggfortify)
+library(RColorBrewer)
+library(randomForest)
+library(Rmisc)
+library(Rtsne)
+library(corrr)
+library(pROC)
+library(caret)
+library(tidyr)
+library(psych)
+library(mclust)
+library(GGally)
+library(formattable)
+library(car)
+library(rstatix)
+library(mclust)
+library(fossil)
+library(foreach)
+library(cowplot)
+library(grid)
+library(tibble)
+library(MVN)
+library(npmv)
+library(wesanderson)
+library(scales)
+library(lmerTest)
+library(see)
+library(performance)
+library(glmmTMB)
+library(DHARMa)
+library(ggthemes)
+library(effects)
+library(caret)
+library(scales)
+library(survival)
+library(survminer)
+library(openxlsx)
+library(MOFA2)
+library(ggExtra)
+
+pal <- wes_palette("Zissou1", 100, type = "continuous") # Heatmap
+
+`%out%` <- function(a,b) ! a %in% b # Need to specify my own operator
+
+cor.mtest <- function(mat, ...) {
+  # mat : is a matrix of data
+  # ... : further arguments to pass to the native R cor.test function
+  mat <- as.matrix(mat)
+  n <- ncol(mat)
+  p.mat<- matrix(NA, n, n)
+  diag(p.mat) <- 0
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      tmp <- cor.test(mat[, i], mat[, j], method = "spearman", alternative = "two.sided") # I checked the results of this test against another independent tool and I got the same p-values.
+      p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+    }
+  }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+} # Get the p-value matrix
+
+
+# Correlation
+cor.function <- function(.x, meth = "pearson") {
+  corel <- cor(.x, method = meth, use = "pairwise.complete.obs") %>%
+    as.data.frame() %>%
+    mutate(x = rownames(.)) %>%
+    melt(., id.vars = "x") %>%
+    dplyr::rename(y = variable)
+  
+  ps <- cor.mtest(.x, use = "pairwise.complete.obs", method = meth) %>%
+    as.data.frame() %>%
+    mutate(x = rownames(.)) %>%
+    melt(., id.vars = "x") %>%
+    dplyr::rename(y = variable)
+  
+  corel$"pval" <- ps$value
+  corel$'stars' <- cut(corel$pval, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", ""))
+  
+  corel <- corel %>%
+    mutate(stars = as.character(stars)) %>%
+    mutate(stars = case_when(round(value) == 1 & pval == 0 ~ "",
+                             TRUE ~ stars)) %>%
+    mutate(stars = case_when(round(pval, 2) > 0.05 & round(pval, 2) <= 0.1 ~ as.character(round(pval, 2)),
+                             TRUE ~ stars))
+    
+  return(corel)
+  
+}
+
+
+my_fn <- function(data, mapping, method="lm", ...){ # for ggpairs
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point(size = 1) 
+    #geom_smooth(method=method, ..., level = 0)
+  p
+}
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+```{r Read in data, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+# Generate penalized expression matrix
+unstim <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 1) %>%
+  mutate(stimulation = "Unstim")
+LPS <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 2) %>%
+  mutate(stimulation = "LPSCI")
+IFN <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 3) %>%
+  mutate(stimulation = "IFNIL")
+PI <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 4) %>%
+  dplyr::select(-X22) %>%
+  mutate(stimulation = "PI")
+pen.df <- rbind(unstim, LPS, IFN, PI) %>%
+  melt(id.vars = c("population", "stimulation"), variable.name = "reagent", value.name = "penalty") %>%
+  mutate(population = case_when(population == "Ki67CD8T" ~ "Ki67CD8",
+                                TRUE ~ population))
+
+cytof.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/083120_COVID_StanfordPBMC_all_preprocessed.csv") %>%
+  full_join(., pen.df, by = c("population", "reagent", "stimulation")) %>%
+  mutate(penalty = case_when(reagent == "frequency" ~ 1,
+                             TRUE ~ penalty)) %>%
+  mutate(penalized = feature * penalty) %>%
+  na.omit() # This deals with the duplicated subjects issue
+  #dplyr::filter(sampleID %in% c("007-0011", "55689-0112")) # These two subjects have duplicated data
+
+meta.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Clinical_12NOV.csv") %>%
+  mutate(sampleID = as.character(sampleID))
+
+olink.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/20201029_Gaudilliere_NPX_2020-07-20_corrected.csv") %>%
+  mutate(group = mapvalues(sampleID, from = meta.df$sampleID, to = as.character(meta.df$Severity))) %>%
+  group_by(sampleID, Assay, group) %>% # TNF, IL6 and IL8 are in all 4 subplexes. Take the
+  dplyr::summarize(NPX = mean(NPX)) %>%
+  dplyr::rename(sample = sampleID, 
+                value = NPX,
+                feature = Assay) %>% 
+  mutate(view = "olink") %>%
+  dplyr::select(sample, feature, view, value, group) %>%
+  ungroup
+
+
+
+
+####### Time series analysis 
+DSO.df <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Onset symptoms.xlsx") %>% # Symptom onset
+  dplyr::rename(DSO = 7) %>%
+  dplyr::select(sampleID, DSO) %>%
+  mutate(sampleID = str_replace_all(sampleID, pattern = " ", replacement = "")) %>%
+  unique()
+
+# top 10% bootstrap features
+olink.features <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_Prot.csv")[-1,] %>%
+  mutate(genes = str_replace(genes, pattern = "HLA.DRA", replacement = "HLA-DRA")) %>%
+  arrange(desc(count_g)) %>%
+  #top_frac(0.1, wt = count_g) 
+  mutate(filter = case_when(row_number() %in% 1:146 ~ "top_n")) %>%
+  na.omit()
+# unique(olink.features$genes)[unique(olink.features$genes) %out% unique(olink.df$feature)]
+
+
+olink.traj <-  olink.df %>%
+  dplyr::rename(sampleID = sample) %>%
+  left_join(., meta.df, by = "sampleID") %>%
+  left_join(., DSO.df, by = "sampleID") %>%
+  mutate(DSO = case_when(Severity == "Control" ~ -5,
+                         TRUE ~ DSO))
+
+# Sample histogram
+olink.histo <- olink.traj %>%
+  dplyr::filter(feature == "ACP5", Severity != "Control") %>%
+  ggplot(aes(x = DSO, fill = Severity)) +
+  geom_histogram() +
+  #geom_vline(xintercept = c(5, 12), linetype= "dashed", alpha = 0.5) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 0, size  = 6.5),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 6.5),
+        strip.text.x = element_text(size = 6.5),
+        legend.position = "bottom",
+        legend.key.size = unit(0.2, 'cm'))
+olink.histo
+# ggsave(plot = olink.histo,
+#        file = paste("olink.histo", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 5.5,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+
+
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+
+
+
+# top 10% bootstrap features
+cytof.features <- rbind(read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_Freq.csv")[-1,],
+                        read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_IFNIL.csv")[-1,],
+                        read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_PI.csv")[-1,],
+                        read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_LPSCI.csv")[-1,],
+                        read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/bootstrap_Unstim.csv")[-1,])
+  
+
+cytof.features <- cytof.features %>%
+  mutate(genes = str_replace(genes, pattern = "HLA.DR", replacement = "HLA-DR")) %>%
+  mutate(population = str_split(genes, pattern = "\\.", simplify = T)[,1],
+         reagent = str_split(genes, pattern = "\\.", simplify = T)[,2],
+         stimulation = str_split(genes, pattern = "\\.", simplify = T)[,3]) %>%
+  arrange(desc(count_g)) %>%
+  #top_frac(0.1, wt = count_g)
+  mutate(stimulation = case_when(reagent == "frequency" ~ "frequency",
+                                 TRUE ~ stimulation)) %>%
+  dplyr::filter(stimulation != "LPSCI") %>%
+  split(.$stimulation) %>%
+  purrr::map(., function(.x) {
+    
+    .x %>%
+      mutate(filter = case_when(stimulation == "Unstim" & row_number() %in% 1:77 ~ "top_n",
+                                stimulation == "frequency" & row_number() %in% 1:4 ~ "top_n",
+                                stimulation == "IFNIL" & row_number() %in% 1:75 ~ "top_n",
+                                stimulation == "PI" & row_number() %in% 1:77 ~ "top_n"))
+      
+  }) %>%
+  bind_rows() %>%
+  na.omit()
+
+ 
+  
+  
+
+# The dataframes for regression
+cytof.traj <- cytof.df %>%
+  mutate(genes = interaction(population, reagent, stimulation)) %>%
+  left_join(., meta.df, by = "sampleID") %>%
+  left_join(., DSO.df, by = "sampleID") %>%
+  mutate(DSO = case_when(Severity == "Control" ~ -5,
+                         TRUE ~ DSO))
+#dplyr::filter(population != "mDCBDCA3") # population mDCBDCA3 has few subjects measured with it
+
+cytof.histo <- cytof.traj %>%
+  dplyr::filter(genes %in% c("pDC.frequency.Unstim","Granulocytes.CD38.IFNIL", "Granulocytes.S6.PI", "IgMnBcell.IgM.Unstim"), Severity != "Control") %>%
+  mutate(stimulation = case_when(reagent == "frequency" ~ "frequency",
+                                 TRUE ~ stimulation)) %>%
+  ggplot(aes(x = DSO, fill = Severity)) +
+  geom_histogram() +
+  #geom_vline(xintercept = c(5, 12), linetype= "dashed", alpha = 0.5) +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 0, size  = 6.5),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 6.5),
+        strip.text.x = element_text(size = 6.5),
+        legend.position = "bottom",
+        legend.key.size = unit(0.2, 'cm'),
+        strip.background = element_blank()) +
+  facet_wrap(.~stimulation, ncol = 4)
+cytof.histo
+# ggsave(plot = cytof.histo,
+#        file = paste("cytof.histo", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 20,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+
+ 
+
+
+
+
+```
+
+
+```{r GAM libraries, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+library(mgcv)
+library(tidymv)
+library(gratia)
+library(purrr)
+xtext <- function(p) {
+  p <- p + theme(legend.position="none")
+  return(p)
+}
+```
+
+
+
+```{r Fit GAM proteomics, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+GAM.summary.olink <- list()
+i <- "IL2RB"
+for (i in unique(olink.features$genes)) {
+  
+  dat.tmp <- olink.traj %>%
+    droplevels() %>%
+    dplyr::filter(feature == i)
+  
+  dat.mod <- dat.tmp %>%
+    dplyr::filter(Severity != "Control") %>%
+    droplevels() %>%
+    mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe")))
+  
+  # Fit the model and extract summary statistics
+  mod.tmp <- gam(value ~ Severity + s(DSO, by = Severity, k = 3), data = dat.mod)
+  summ.tmp <- summary(mod.tmp)
+  
+  
+  
+  smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(edf = summ.tmp$edf) %>%
+    mutate(genes = i)
+  
+  
+  GAM.summary.olink[[i]] <- smooth.pv %>%
+    dplyr::rename(p.value = 1)
+  
+}
+gam.ps.olink <- do.call("rbind", GAM.summary.olink) %>%
+  split(.$Severity) %>% ## FDR per seveity group
+  purrr::map(., function(.x) {
+    .x <- .x %>% 
+      mutate(p.adj = p.adjust(p.value, method = "BH", n = length(p.value))) %>% 
+      arrange(p.adj)
+  }) %>%
+  bind_rows() %>%
+  arrange(p.adj) %>%
+  mutate(stimulation = "olink",
+         population = NA,
+         reagent = NA)
+
+
+
+
+# Plot hits
+plot.list <- list()
+for (i in gam.ps.olink %>%
+     filter(p.adj < 0.05) %>%
+     dplyr::select(genes) %>%
+     unlist) {
+  
+  dat.tmp <- olink.traj %>%
+    droplevels() %>%
+    dplyr::filter(feature == i) 
+  
+  dat.mod <- dat.tmp %>%
+    dplyr::filter(Severity != "Control") %>%
+    droplevels() %>%
+    mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe")))
+  
+  # Fit the model and extract summary statistics
+  mod.tmp <- gam(value ~ Severity + s(DSO, by = Severity, k = 3), data = dat.mod)
+  summ.tmp <- summary(mod.tmp)
+  
+  
+  intercepts <- data.frame(summ.tmp$p.coeff) %>%
+    rownames_to_column() %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(summ.tmp.p.coeff = case_when(Severity == "Mild" ~ summ.tmp.p.coeff,
+                                        TRUE ~ summ.tmp.p.coeff + .[1,2])) # Add the intercept value
+  
+  j <- gratia::draw(mod.tmp) # Get the model fitted values with CI
+  dft<- bind_rows(j[[1]]$data, j[[2]]$data,j[[3]]$data) %>%
+    full_join(., intercepts, by = "Severity") %>%
+    mutate(est = est + summ.tmp.p.coeff,
+           lower_ci = lower_ci + summ.tmp.p.coeff,
+           upper_ci = upper_ci + summ.tmp.p.coeff)
+  
+  
+  smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(edf = summ.tmp$edf)
+  
+  # Plot
+  plot.tmp <- dat.tmp %>%
+    ggplot(aes(x = DSO, y = value, colour = Severity)) +
+    geom_point(size = 1, alpha = 0.9) +
+    geom_line(data = dft, aes(y = est, x = DSO), inherit.aes = T) +
+    geom_ribbon(data = dft, aes(ymin = lower_ci, ymax = upper_ci, x = DSO,fill = Severity),alpha = 0.1, inherit.aes = F, size = 1) +
+    theme_bw() +
+    scale_fill_manual(values = c("#000000", "#000000", "#000000")) +
+    scale_colour_manual(values = c("#D5501E", "#0072BC", "#00A875", "#DA6FAB")) +
+    stat_summary(data = . %>%
+                   dplyr::filter(Severity == "Control"),
+                 aes(y = value), fun.y=median, geom="crossbar", colour = "black", width =5, size = 0.3) + 
+    guides(fill = F) +
+    theme(axis.title.x = element_text(size = 6.5),
+          axis.title.y = element_text(size = 6.5),
+          axis.text.x = element_text(angle = 0, size  = 6.5),
+          axis.text.y = element_text(size = 6.5),
+          plot.title = element_text(size = 6.5),
+          legend.text = element_text(size = 6.5),
+          legend.title = element_text(size = 6.5),
+          strip.text.x = element_text(size = 6.5), 
+          strip.background = element_blank(), 
+          panel.grid = element_blank()) +
+    labs(title = i)
+  
+  
+  # Extract plot axis ranges for plotting p.values
+  smooth.pv <- smooth.pv %>%
+    mutate( i = i,
+            x = layer_scales(plot.tmp)$x$range$range[2] * c(0.9),
+            y = layer_scales(plot.tmp)$y$range$range[2] * c(0.9, 0.75, 0.6),
+            label = paste0("p = ", round(summ.tmp.s.pv, 4)))
+  plot.tmp <- plot.tmp + geom_text(data = smooth.pv, aes(x = x, y = y, label = label, colour = Severity), show.legend = FALSE, size = 6.5 / (14/5))
+  plot.list[[i]] <- plot.tmp
+
+  
+}
+plot.list
+
+```
+
+
+```{r Fit GAM cytof frequency, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+cytof.freq <- cytof.features %>%
+  dplyr::filter(stimulation == "frequency") %>%
+  na.omit()
+GAM.summary.freq <- cytof.traj %>%
+  droplevels() %>%
+  dplyr::filter(Severity != "Control") %>%
+  filter(genes %in% unique(cytof.freq$genes)) %>%
+  droplevels() %>%
+  mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe"))) %>%
+  split(.$genes) %>%
+  purrr::map(., safely(function(x) {
+    
+    x <- x %>%
+      mutate(penalized = log10(penalized)) # Log transform for GAM screening
+    # Fit the model and extract summary statistics
+    mod.tmp <- gam(penalized ~ Severity + s(DSO, by = Severity, k = 3), data = x)
+    summ.tmp <- summary(mod.tmp)
+    smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+      mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+      mutate(edf = summ.tmp$edf) %>%
+      mutate(genes = unique(x$genes)) %>%
+      dplyr::rename(p.value = 1)
+    
+    
+    return(smooth.pv)
+  }))
+GAM.summary.freq <- transpose(GAM.summary.freq) # This contains errors and results
+gam.ps.freq <- bind_rows(GAM.summary.freq$result, .id = "feature") %>%
+  mutate(population = str_split(genes, pattern = "\\.", simplify = T)[,1],
+         reagent = str_split(genes, pattern = "\\.", simplify = T)[,2],
+         stimulation = str_split(genes, pattern = "\\.", simplify = T)[,3]) %>%
+  mutate(U = interaction(Severity, stimulation)) %>%
+  split(.$U) %>%
+  purrr::map(., function(.x) {
+    .x <- .x %>% 
+      mutate(p.adj = p.adjust(p.value, method = "BH", n = length(p.value))) %>%
+      arrange(p.adj)
+  }) %>%
+  bind_rows() %>%
+  arrange(p.adj) %>%
+  dplyr::select(-feature, -U)
+
+
+
+for (i in gam.ps.freq%>%
+     filter(p.adj < 0.05) %>%
+     dplyr::select(genes) %>%
+     unlist) {
+  
+  dat.tmp <- cytof.traj %>%
+    droplevels() %>%
+    dplyr::filter(genes == i)
+  
+  dat.mod <- dat.tmp %>%
+    dplyr::filter(Severity != "Control") %>%
+    droplevels() %>%
+    mutate(penalized = log10(penalized)) %>%
+    mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe")))
+  
+  # Fit the model and extract summary statistics
+  mod.tmp <- gam(penalized ~ Severity + s(DSO, by = Severity, k = 3), data = dat.mod)
+  summ.tmp <- summary(mod.tmp)
+  
+  intercepts <- data.frame(summ.tmp$p.coeff) %>%
+    rownames_to_column() %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(summ.tmp.p.coeff = case_when(Severity == "Mild" ~ summ.tmp.p.coeff,
+                                        TRUE ~ summ.tmp.p.coeff + .[1,2])) # Add the intercept value
+  
+  j <- gratia::draw(mod.tmp) # Get the model fitted values with CI
+  dft<- bind_rows(j[[1]]$data, j[[2]]$data,j[[3]]$data) %>%
+    full_join(., intercepts, by = "Severity") %>%
+    mutate(est = est + summ.tmp.p.coeff,
+           lower_ci = lower_ci + summ.tmp.p.coeff,
+           upper_ci = upper_ci + summ.tmp.p.coeff) %>%
+    
+    mutate(est = 10^est, # Unlog the result
+           lower_ci = 10^lower_ci,
+           upper_ci = 10^upper_ci)
+  
+  
+  
+  smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(edf = summ.tmp$edf)
+  
+  # Plot
+  plot.tmp <- dat.tmp %>%
+    ggplot(aes(x = DSO, y = penalized, colour = Severity)) +
+    geom_point(size = 1, alpha = 0.9) +
+    geom_line(data = dft, aes(y = est, x = DSO), inherit.aes = T) +
+    geom_ribbon(data = dft, aes(ymin = lower_ci, ymax = upper_ci, x = DSO,fill = Severity),alpha = 0.1, inherit.aes = F, size = 1) +
+    theme_bw() +
+    scale_fill_manual(values = c("#000000", "#000000", "#000000")) +
+    scale_colour_manual(values = c("#D5501E", "#0072BC", "#00A875", "#DA6FAB")) +
+    stat_summary(data = . %>%
+                   dplyr::filter(Severity == "Control"),
+                 aes(y = penalized), fun.y=median, geom="crossbar", colour = "black", width =5, size = 0.3) + 
+    guides(fill = F) +
+    theme(axis.title.x = element_text(size = 6.5),
+          axis.title.y = element_text(size = 6.5),
+          axis.text.x = element_text(angle = 0, size  = 6.5),
+          axis.text.y = element_text(size = 6.5),
+          plot.title = element_text(size = 6.5),
+          legend.text = element_text(size = 6.5),
+          legend.title = element_text(size = 6.5),
+          strip.text.x = element_text(size = 6.5), 
+          strip.background = element_blank(), 
+          panel.grid = element_blank()) +
+    scale_y_continuous(trans = "log10") +
+    labs(title = i)
+  
+  
+  # Extract plot axis ranges for plotting p.values
+  smooth.pv <- smooth.pv %>%
+    mutate(i = i,
+           x = layer_scales(plot.tmp)$x$range$range[2] * c(0.9, 0.5, 0.25),
+           y = layer_scales(plot.tmp)$y$range$range[2] * c(0.9, 0.86, 0.82),
+           label = paste0("p = ", round(summ.tmp.s.pv, 4)))
+  plot.tmp <- plot.tmp + geom_text(data = smooth.pv, aes(x = x, y = 10^y, label = label, colour = Severity), show.legend = FALSE, size = 6.5 / (14/5))
+  plot.list[[i]] <- plot.tmp
+
+  
+}
+
+```
+
+
+```{r Fit GAM cytof signaling, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+cytof.signalling <- cytof.features %>%
+  dplyr::filter(stimulation != "frequency") %>%
+  na.omit() 
+GAM.summary.signalling <- cytof.traj %>%
+  droplevels() %>%
+  dplyr::filter(Severity != "Control") %>%
+  filter(genes %in% unique(cytof.signalling$genes)) %>%
+  droplevels() %>%
+  mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe"))) %>%
+  split(.$genes) %>%
+  purrr::map(., safely(function(x) {
+    
+    
+    # Fit the model and extract summary statistics
+    mod.tmp <- gam(penalized ~ Severity + s(DSO, by = Severity, k = 3), data = x)
+    summ.tmp <- summary(mod.tmp)
+    smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+      mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+      mutate(edf = summ.tmp$edf) %>%
+      mutate(genes = unique(x$genes)) %>%
+      dplyr::rename(p.value = 1)
+    
+    
+    return(smooth.pv)
+  }))
+GAM.summary.signalling <- transpose(GAM.summary.signalling) # This contains errors and results
+gam.ps.signalling <- bind_rows(GAM.summary.signalling$result, .id = "feature") %>%
+  mutate(population = str_split(genes, pattern = "\\.", simplify = T)[,1],
+         reagent = str_split(genes, pattern = "\\.", simplify = T)[,2],
+         stimulation = str_split(genes, pattern = "\\.", simplify = T)[,3]) %>%
+  mutate(U = interaction(Severity, stimulation)) %>%
+  split(.$U) %>%
+  purrr::map(., function(.x) {
+    .x <- .x %>% 
+      mutate(p.adj = p.adjust(p.value, method = "BH", n = length(p.value))) %>%
+      arrange(p.adj)
+  }) %>%
+  bind_rows() %>%
+  arrange(p.adj) %>%
+  dplyr::select(-feature, -U)
+
+names(GAM.summary.signalling$error[lengths(GAM.summary.signalling$error) != 0]) # Removes NA, these are the features that failed to support a model (4 in total)
+
+
+
+
+for (i in gam.ps.signalling %>%
+     filter(p.adj < 0.05) %>%
+     dplyr::select(genes) %>%
+     unlist) {
+  
+  dat.tmp <- cytof.traj %>%
+    droplevels() %>%
+    dplyr::filter(genes == i)
+  
+  dat.mod <- dat.tmp %>%
+    dplyr::filter(Severity != "Control") %>%
+    droplevels() %>%
+    mutate(Severity = factor(Severity, levels = c("Mild", "Moderate", "Severe")))
+  
+  # Fit the model and extract summary statistics
+  mod.tmp <- gam(penalized ~ Severity + s(DSO, by = Severity, k = 3), data = dat.mod)
+  summ.tmp <- summary(mod.tmp)
+  
+  intercepts <- data.frame(summ.tmp$p.coeff) %>%
+    rownames_to_column() %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(summ.tmp.p.coeff = case_when(Severity == "Mild" ~ summ.tmp.p.coeff,
+                                        TRUE ~ summ.tmp.p.coeff + .[1,2])) # Add the intercept value
+  
+  j <- gratia::draw(mod.tmp) # Get the model fitted values with CI
+  dft<- bind_rows(j[[1]]$data, j[[2]]$data,j[[3]]$data) %>%
+    full_join(., intercepts, by = "Severity") %>%
+    mutate(est = est + summ.tmp.p.coeff,
+           lower_ci = lower_ci + summ.tmp.p.coeff,
+           upper_ci = upper_ci + summ.tmp.p.coeff)
+  
+  
+  smooth.pv <- data.frame(summ.tmp$s.pv) %>%
+    mutate(Severity = c("Mild", "Moderate", "Severe")) %>%
+    mutate(edf = summ.tmp$edf)
+  
+  # Plot
+  plot.tmp <- dat.tmp %>%
+    ggplot(aes(x = DSO, y = penalized, colour = Severity)) +
+    geom_point(size = 1, alpha = 0.9) +
+    geom_line(data = dft, aes(y = est, x = DSO), inherit.aes = T) +
+    geom_ribbon(data = dft, aes(ymin = lower_ci, ymax = upper_ci, x = DSO,fill = Severity),alpha = 0.1, inherit.aes = F, size = 1) +
+    theme_bw() +
+    scale_fill_manual(values = c("#000000", "#000000", "#000000")) +
+    scale_colour_manual(values = c("#D5501E", "#0072BC", "#00A875", "#DA6FAB")) +
+    stat_summary(data = . %>%
+                   dplyr::filter(Severity == "Control"),
+                 aes(y = penalized), fun.y=median, geom="crossbar", colour = "black", width =5, size = 0.3) + 
+    guides(fill = F) +
+    theme(axis.title.x = element_text(size = 6.5),
+          axis.title.y = element_text(size = 6.5),
+          axis.text.x = element_text(angle = 0, size  = 6.5),
+          axis.text.y = element_text(size = 6.5),
+          plot.title = element_text(size = 6.5),
+          legend.text = element_text(size = 6.5),
+          legend.title = element_text(size = 6.5),
+          strip.text.x = element_text(size = 6.5), 
+          strip.background = element_blank(), 
+          panel.grid = element_blank()) +
+    labs(title = i)
+  
+  
+  # Extract plot axis ranges for plotting p.values
+  smooth.pv <- smooth.pv %>%
+    mutate(i = i,
+           x = layer_scales(plot.tmp)$x$range$range[2] * c(0.9, 0.5, 0.25),
+           y = layer_scales(plot.tmp)$y$range$range[2] * c(0.9, 0.86, 0.82),
+           label = paste0("p = ", round(summ.tmp.s.pv, 4)))
+  plot.tmp <- plot.tmp + geom_text(data = smooth.pv, aes(x = x, y = y, label = label, colour = Severity), show.legend = FALSE, size = 6.5 / (14/5))
+  plot.list[[i]] <- plot.tmp
+  
+  
+}
+
+
+
+
+
+
+gam.ps.plot <- rbind(gam.ps.olink, gam.ps.freq, gam.ps.signalling) %>%
+  mutate(stimulation = case_when(reagent == "frequency" ~ "frequency",
+                                 TRUE ~ stimulation)) %>%
+  mutate(`FDR < 0.05` = case_when(p.adj <= 0.05 ~ "yes",
+                                  TRUE ~  "no")) %>%
+  mutate(`FDR < 0.05` = factor(`FDR < 0.05`, levels = c("yes", "no"))) %>%
+  arrange(p.value) %>%
+  ggplot(aes(x = p.value, fill = `FDR < 0.05`)) +
+  geom_histogram() +
+  scale_fill_manual(values = c("red", "grey")) +
+  theme_bw() +
+  labs(title = "distribution of smooth term p.values") +
+  scale_x_continuous(breaks = seq(0,1, by = 0.05)) + 
+  theme(axis.text.x = element_text(size= 4, angle = 90, vjust =0.5),
+        axis.text.y = element_text(size= 4),
+        title = element_text(size= 4.5),
+        strip.background = element_blank(), 
+        panel.grid = element_blank(), 
+        strip.text = element_text(size= 4), 
+        legend.text=element_text(size= 4)) +
+  facet_grid(stimulation~Severity)
+gam.ps.plot
+# ggsave(plot =gam.ps.plot,
+#        file = paste("gam.ps.plot", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 10,
+#        height = 8,
+#        units = "cm",
+#        device = "pdf")
+
+
+
+
+
+legend <- plot.list[[1]]
+legend <- cowplot::get_legend(legend)
+plot.list <- lapply(plot.list, xtext)
+n <- length(plot.list)
+nCol <- floor(sqrt(n))
+plot.list[["legend"]] <- legend
+total.plot <- do.call("grid.arrange", c(plot.list, ncol=nCol))
+# ggsave(plot = total.plot,
+#        file = paste("total.plot", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 20,
+#        height = 25,
+#        units = "cm",
+#        device = "pdf")
+
+
+names(GAM.summary.signalling$error[lengths(GAM.summary.signalling$error) != 0]) # Removes NA, these aree thee feeatures that failed
+gam.ps <- rbind(gam.ps.olink, gam.ps.freq, gam.ps.signalling) %>%
+  dplyr::select(-edf)
+#write.xlsx(gam.ps, file = "/Users/joshgillard/Desktop/GAM_ps.xlsx")
+
+
+
+
+
+
+```
+
+```{r Plot pvalue distribution and hits, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+
+
+
+gam.ps.plot <- rbind(gam.ps.olink, gam.ps.freq, gam.ps.signalling) %>%
+  mutate(stimulation = case_when(reagent == "frequency" ~ "frequency",
+                                 TRUE ~ stimulation)) %>%
+  mutate(`FDR < 0.05` = case_when(p.adj <= 0.05 ~ "yes",
+                                  TRUE ~  "no")) %>%
+  mutate(`FDR < 0.05` = factor(`FDR < 0.05`, levels = c("yes", "no"))) %>%
+  arrange(p.value) %>%
+  ggplot(aes(x = p.value, fill = `FDR < 0.05`)) +
+  geom_histogram() +
+  scale_fill_manual(values = c("red", "grey")) +
+  theme_bw() +
+  labs(title = "distribution of smooth term p.values") +
+  scale_x_continuous(breaks = seq(0,1, by = 0.05)) + 
+  theme(axis.text.x = element_text(size= 4, angle = 90, vjust =0.5),
+        axis.text.y = element_text(size= 4),
+        title = element_text(size= 4.5),
+        strip.background = element_blank(), 
+        panel.grid = element_blank(), 
+        strip.text = element_text(size= 4), 
+        legend.text=element_text(size= 4)) +
+  facet_grid(stimulation~Severity)
+gam.ps.plot
+# ggsave(plot =gam.ps.plot,
+#        file = paste("gam.ps.plot", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 10,
+#        height = 8,
+#        units = "cm",
+#        device = "pdf")
+
+
+
+
+
+legend <- plot.list[[1]]
+legend <- cowplot::get_legend(legend)
+plot.list <- lapply(plot.list, xtext)
+n <- length(plot.list)
+nCol <- floor(sqrt(n))
+plot.list[["legend"]] <- legend
+total.plot <- do.call("grid.arrange", c(plot.list, ncol=nCol))
+# ggsave(plot = total.plot,
+#        file = paste("total.plot", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 20,
+#        height = 25,
+#        units = "cm",
+#        device = "pdf")
+
+# print p.value table
+names(GAM.summary.signalling$error[lengths(GAM.summary.signalling$error) != 0]) # Removes NA, these aree thee feeatures that failed
+gam.ps <- rbind(gam.ps.olink, gam.ps.freq, gam.ps.signalling) %>%
+  dplyr::select(-edf)
+#write.xlsx(gam.ps, file = "/Users/joshgillard/Desktop/GAM_ps.xlsx")
+
+
+
+
+
+
+```
+
+
+
+
+

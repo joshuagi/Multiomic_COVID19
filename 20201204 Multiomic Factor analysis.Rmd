@@ -1,0 +1,830 @@
+---
+title: "Multi-omic COVID-19 Manuscript figures"
+output:
+  html_document:
+    df_print: paged
+    toc: TRUE
+    theme: united
+date: "June 2020"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+library(dplyr)
+library(gridExtra)
+library(pheatmap)
+library(plyr)
+library(data.table)
+library(openxlsx)
+library(cowplot)
+library(stringr)
+library(corrplot)
+library(glmnet)
+library(ggfortify)
+library(RColorBrewer)
+library(randomForest)
+library(Rmisc)
+library(Rtsne)
+library(corrr)
+library(pROC)
+library(caret)
+library(tidyr)
+library(psych)
+library(mclust)
+library(GGally)
+library(formattable)
+library(car)
+library(rstatix)
+library(mclust)
+library(fossil)
+library(foreach)
+library(cowplot)
+library(grid)
+library(tibble)
+library(MVN)
+library(npmv)
+library(wesanderson)
+library(scales)
+library(lmerTest)
+library(see)
+library(performance)
+library(glmmTMB)
+library(DHARMa)
+library(ggthemes)
+library(effects)
+library(caret)
+library(scales)
+library(survival)
+library(survminer)
+library(openxlsx)
+library(MOFA2)
+library(ggExtra)
+
+pal <- wes_palette("Zissou1", 100, type = "continuous") # Heatmap
+
+`%out%` <- function(a,b) ! a %in% b # Need to specify my own operator
+
+cor.mtest <- function(mat, ...) {
+  # mat : is a matrix of data
+  # ... : further arguments to pass to the native R cor.test function
+  mat <- as.matrix(mat)
+  n <- ncol(mat)
+  p.mat<- matrix(NA, n, n)
+  diag(p.mat) <- 0
+  for (i in 1:(n - 1)) {
+    for (j in (i + 1):n) {
+      tmp <- cor.test(mat[, i], mat[, j], method = "spearman", alternative = "two.sided") # I checked the results of this test against another independent tool and I got the same p-values.
+      p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+    }
+  }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+} # Get the p-value matrix
+
+
+
+my_fn <- function(data, mapping, method="lm", ...){ # for ggpairs
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point(size = 1) 
+    #geom_smooth(method=method, ..., level = 0)
+  p
+}
+
+
+
+
+
+
+
+
+```
+
+
+
+
+```{r read-n-wrangle,  echo = FALSE, eval = TRUE, warning = FALSE, message = FALSE}
+# Generate penalized expression matrix
+unstim <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 1) %>%
+  mutate(stimulation = "Unstim")
+LPS <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 2) %>%
+  mutate(stimulation = "LPSCI")
+IFN <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 3) %>%
+  mutate(stimulation = "IFNIL")
+PI <- read.xlsx("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Penalization matrix_CyTOF.xlsx", sheet = 4) %>%
+  dplyr::select(-X22) %>%
+  mutate(stimulation = "PI")
+pen.df <- rbind(unstim, LPS, IFN, PI) %>%
+  melt(id.vars = c("population", "stimulation"), variable.name = "reagent", value.name = "penalty") %>%
+  mutate(population = case_when(population == "Ki67CD8T" ~ "Ki67CD8",
+                                TRUE ~ population))
+
+cytof.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/083120_COVID_StanfordPBMC_all_preprocessed.csv") %>%
+  full_join(., pen.df, by = c("population", "reagent", "stimulation")) %>%
+  mutate(penalty = case_when(reagent == "frequency" ~ 1,
+                             TRUE ~ penalty)) %>%
+  mutate(penalized = feature * penalty) %>%
+  na.omit() # This deals with the duplicated subjects issue
+  #dplyr::filter(sampleID %in% c("007-0011", "55689-0112")) # These two subjects have duplicated data
+
+meta.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Clinical_12NOV.csv") %>%
+  mutate(sampleID = as.character(sampleID))
+
+olink.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/20201029_Gaudilliere_NPX_2020-07-20_corrected.csv") %>%
+  mutate(group = mapvalues(sampleID, from = meta.df$sampleID, to = as.character(meta.df$Severity))) %>%
+  group_by(sampleID, Assay, group) %>% # TNF, IL6 and IL8 are in all 4 subplexes. Take the
+  dplyr::summarize(NPX = mean(NPX)) %>%
+  dplyr::rename(sample = sampleID, 
+                value = NPX,
+                feature = Assay) %>% 
+  mutate(view = "olink") %>%
+  dplyr::select(sample, feature, view, value, group) %>%
+  ungroup
+```
+
+
+```{r mofa prep,  echo = FALSE, eval = TRUE, warning = FALSE, message = FALSE}
+# MOFA prep
+cytof.df <- cytof.df %>% 
+  mutate(stimulation = case_when(reagent == "frequency" ~ "frequency",
+                                 TRUE ~ stimulation)) %>%
+  mutate(feature = paste0(population, ".", reagent)) %>%
+  dplyr::rename(sample = sampleID,
+                value = penalized,
+                view = stimulation) %>%
+  dplyr::select(sample, feature, view, value, group) %>%
+  split(.$view) 
+
+dat <- rbind(cytof.df$frequency, cytof.df$Unstim, cytof.df$IFNIL, cytof.df$LPSCI, cytof.df$PI, olink.df) %>%
+  dplyr::select(-group)
+
+MOFAobject <- create_mofa(dat)
+
+
+# Settings for MOFA calculation
+data_opts <- get_default_data_options(MOFAobject)
+data_opts$scale_views <- FALSE
+model_opts <- get_default_model_options(MOFAobject)
+model_opts$num_factors <- 25 # the maximum of 25 factors allowed for each run; however for each initialization, the total number of factors that explain the most variation of the data are calculated (this number is always less than 25)
+train_opts <- get_default_training_options(MOFAobject)
+train_opts$convergence_mode <- "slow"
+train_opts$drop_factor_threshold <- 0.02
+train_opts$seed <- 42
+train_opts$maxiter <- 10000
+```
+
+
+```{r mofa inits,  echo = FALSE, eval = FALSE, warning = FALSE, message = FALSE}
+n_inits <- 10
+MOFAlist <- lapply(seq_len(n_inits), function(it) {
+  
+  train_opts$seed <- 41 + it
+  
+  MOFAobject <- prepare_mofa(
+    object = MOFAobject,
+    data_options = data_opts,
+    model_options = model_opts,
+    training_options = train_opts
+  )
+  
+  run_mofa(MOFAobject, use_basilisk = TRUE)
+})
+#saveRDS(MOFAlist, file = "/Users/joshgillard/Desktop/Bioinformatics/Multiomic COVID19/MOFA_COVID.rds")
+```
+
+
+```{r mofa modelselection,  echo = FALSE, eval = TRUE, warning = FALSE, message = FALSE}
+MOFAlist <- readRDS(file = "/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/MOFA_COVID.rds")
+MOFAobject.trained <- select_model(MOFAlist)
+mofa_fac <- get_factors(MOFAobject.trained)
+var.explained <- calculate_variance_explained(MOFAobject.trained)
+```
+
+
+## Model selection {.tabset}
+
+### No. factors and ELBO score
+
+```{r elbo and factors, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 9, fig.width = 9}
+i <- 1
+res <- data.frame(elbo = numeric(),
+                  fac = numeric(),
+                  model =  numeric())
+for (i in 1:length(MOFAlist)) {
+  mofa.tmp <- MOFAlist[[i]]
+  elbo.tmp <- max(mofa.tmp@training_stats$elbo)
+  fac.tmp <- min(mofa.tmp@training_stats$number_factors)
+  res[i, 1] <- elbo.tmp
+  res[i, 2] <- fac.tmp
+  res[i, 3] <- i
+}
+MOFA.selection <- res %>%
+  ggplot(aes(x = model, y = fac, fill = elbo)) +
+  geom_bar(stat = "identity", 
+           color = "black", width = 0.9) +
+  theme_minimal() +
+  scale_fill_gradientn(colors = c("gray97", "darkblue"), 
+                       
+                       values = scales::rescale(c(0, 1, 32, 38, 40)),
+                       guide = "colorbar") +
+  labs(y = "number of active factors",
+       x = "model trials") +
+  scale_x_continuous(breaks = 1:10) +
+   theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 0, size  = 6.5),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 6.5),
+        strip.text.x = element_text(size = 6.5))
+MOFA.selection
+
+
+# ggsave(plot = MOFA.selection,
+#        file = paste("MOFA.selection", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 6,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+```
+
+### Compare factors
+
+In downstream analyses we discover factor 3 and factor 10 of model 6 are correlated with COVID-19 severity. 
+
+in this plot, we can see if those factors are consistently discovered across different random initializations of MOFA
+
+```{r POS n, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 12, fig.width = 20}
+compare_factors(MOFAlist)
+
+```
+
+
+## Model Overview {.tabset}
+
+### Factor correlation
+
+```{r factor corr, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 6, fig.width = 6}
+plot_factor_cor(MOFAobject.trained)
+# This is a check on the quality of the MOFA factor calculation; ideally, each mofa factor will not be highly correlated with any other mofa factor.
+```
+
+### % Var explained
+
+```{r total var explained, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 6, fig.width = 6}
+# How much of the joint variation in the data is explained by each dataset?
+var.explained %>%
+  magrittr::extract2(1) %>%
+  unname() %>%
+  as.data.frame() %>%
+  dplyr::rename(value = 1) %>%
+  rownames_to_column("dataset") %>%
+  ggplot(aes(x = dataset, y = value)) +
+  geom_bar(stat = "identity", fill = "deepskyblue4", 
+           color = "black", width = 0.9) +
+  theme_minimal() +
+  labs(y = "% variance explained",
+       x = "")
+```
+
+
+### Factor breakdown
+
+```{r factor var explained, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 6, fig.width = 6}
+original <- var.explained %>%
+  magrittr::extract2(2) %>%
+  unname() %>%
+  data.frame() %>%
+  rownames_to_column("factors") %>%
+  melt(., id.vars = "factors") %>%
+
+  mutate(factors = factor(factors, levels = unique(.$factors))) %>%
+
+  ggplot(aes(x = factors, y = variable)) +
+  geom_tile(aes(fill = value)) +
+  geom_text(aes(label = paste0(round(value, 2))), size  =  6.5 / (14/5)) +
+  coord_equal() +
+  theme_minimal() +
+  scale_fill_gradientn(colors = c("gray97", "darkblue"), 
+                       guide = "colorbar") +
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(y = "",
+       x = "",
+       fill = "% variance explained")
+# ggsave(plot = original,
+#        file = paste("original", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 18,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+
+
+mofa.loading <- var.explained %>%
+  magrittr::extract2(2) %>%
+  unname() %>%
+  data.frame() %>%
+  rownames_to_column("factors") %>%
+  melt(., id.vars = "factors") %>%
+  
+  mutate(factors = factor(factors, levels = unique(.$factors))) %>%
+  
+  ggplot(aes(x = factors, y = variable)) +
+  geom_tile(aes(fill = value)) +
+  #geom_text(aes(label = paste0(round(value, 2))), size  =  6.5 / (14/5)) +
+  coord_equal()+
+  theme_minimal() +
+  scale_fill_gradientn(colors = c("gray97", "darkblue"), 
+                       values = scales::rescale(c(0, 1, 32, 38, 40)),
+                       guide = "colorbar") +
+  labs(y = "",
+       x = "",
+       fill = "% variance explained") +
+  theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 90, size = 6.5, vjust=0.9, hjust = 0.9),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 6.5),
+        strip.text.x = element_text(size = 6.5))
+mofa.loading
+
+# ggsave(plot = mofa.loading,
+#        file = paste("mofa.loading", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 18,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+
+
+
+
+```
+
+
+### Factor regression
+
+```{r factor regress, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 6, fig.width = 6}
+dat.tmp <- mofa_fac$single_group %>%
+  data.frame() %>%
+  rownames_to_column("sampleID") %>%
+  mutate(group = mapvalues(sampleID, from = meta.df$sampleID, to = as.character(meta.df$Severity))) %>%
+  mutate(regress = case_when(group == "Control" ~ 1,
+                             group == "Mild" ~ 2,
+                             group == "Moderate" ~ 3,
+                             group == "Severe" ~ 4)) %>%
+  dplyr::select(-sampleID, -group)
+
+
+mod.tmp <- lm(regress ~ . , data = dat.tmp)
+summ.tmp <- summary(mod.tmp)
+
+
+
+
+
+factor.regression <- summ.tmp$coefficients %>%
+  cbind(.,confint(mod.tmp)) %>%
+  data.frame() %>%
+  rownames_to_column("Factor") %>%
+  dplyr::rename(upperCL = 7,
+                lowerCL = 6,
+                p.value = 5) %>%
+  dplyr::filter(Factor %like% "Factor") %>%
+  mutate(Factor = factor(Factor, levels = unique(.$Factor))) %>%
+  ggplot(aes(x = Factor, y = Estimate)) + 
+  geom_errorbar(aes(ymin=lowerCL, ymax=upperCL), colour="black", alpha = 0.5, width = 0) +
+  geom_point() +
+  geom_text(aes(label = paste0("p = ", round(p.value, 3)), x = Factor, y = -0.5), size  = 2) +
+  theme_minimal() +
+  coord_flip() +
+  labs(x = "",
+       y = "Estimate",
+       title = "") +
+  theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 0, size = 6.5, vjust=0.9, hjust = 0.9),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_text(size = 6.5),
+        strip.text.x = element_text(size = 6.5)) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.3) +
+  scale_y_continuous(breaks = c(-0.5, -0.25, 0, 0.25, 0.5))
+factor.regression
+
+
+# ggsave(plot = factor.regression,
+#        file = paste("factor.regression", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 15,
+#        height = 6,
+#        units = "cm",
+#        device = "pdf")
+
+
+```
+
+### Factor plot
+
+```{r factor plot colours, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+#ggplot.save <- function(...) ggplot2::ggplot(...)
+#ggplot <- ggplot.save
+
+# For setting colour scales with GGally
+colfunc.red <- colorRampPalette(c("white", "#AA0114"))
+ggplot <- function(...) ggplot2::ggplot(...) + scale_colour_manual(values = c("#000000",colfunc.red(4)[-1])) + scale_fill_manual(values = c("#000000",colfunc.red(4)[-1]))
+unlockBinding("ggplot",parent.env(asNamespace("GGally")))
+assign("ggplot",ggplot,parent.env(asNamespace("GGally")))
+
+```
+
+
+```{r factor plot, echo = FALSE, message = FALSE, warning  = FALSE, fig.height = 9, fig.width = 9}
+# Visualize significant factors
+mofa_fac$single_group %>% 
+  data.frame() %>%
+  rownames_to_column("sampleID") %>%
+  mutate(group = mapvalues(sampleID, from = meta.df$sampleID, to = as.character(meta.df$Severity))) %>%
+  dplyr::select(2:18, group) %>%
+  ggpairs(.,
+          columns = c(3,10),
+          progress = TRUE,
+          mapping = ggplot2::aes(colour = group),
+          lower = list(continuous = my_fn),
+          upper = list(continuous = my_fn),
+          diag = list(discrete= "blankDiag",
+                      continuous = wrap("densityDiag", alpha=0.5)),
+          legend = 1
+  ) +
+  theme_bw() + # theme customizations
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 7),
+        legend.title = element_text(size = 7),
+        panel.grid.major = element_blank())
+
+```
+
+```{r factor plot , echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+plot.factor <- mofa_fac$single_group %>% # Only factors 2 and 5
+  data.frame() %>%
+  rownames_to_column("sampleID") %>%
+  mutate(group = mapvalues(sampleID, from = meta.df$sampleID, to = as.character(meta.df$Severity)))
+
+p <- ggplot(plot.factor, aes(x = Factor3, y = Factor10, colour = group)) +
+  geom_point(size = 2) +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 6.5),
+        axis.title.y = element_text(size = 6.5),
+        axis.text.x = element_text(angle = 0, size = 6.5, vjust=0.9, hjust = 0.9),
+        axis.text.y = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5),
+        legend.text = element_text(size = 6.5),
+        legend.title = element_blank(),
+        strip.text.x = element_text(size = 6.5),
+        legend.position = "bottom") #+
+  #scale_colour_manual(values = c("#FF5280", "#6BE000)
+factor.plot <- ggExtra::ggMarginal(p, type = "density", groupFill = TRUE)
+factor.plot
+
+
+
+# ggsave(plot = factor.plot,
+#        file = paste("factor.plot", ".pdf", sep=""),
+#        path = "/Users/joshgillard/Desktop/",
+#        width = 9,
+#        height = 9,
+#        units = "cm",
+#        device = "pdf")
+```
+
+
+# Patient characteristics analysis
+
+
+```{r Cross correlate patient characteristics, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+meta.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Data/Clinical_info_June10.csv", na.strings = "NA", stringsAsFactors = T) %>%
+  mutate(sampleID = as.character(sampleID)) %>% # Dummy encode severity labels for regression analysis
+  mutate(Severity = case_when(Severity == "Severe" ~ 4,
+                              Severity == "Moderate" ~ 3,
+                              Severity == "Mild" ~ 2,
+                              Severity == "Healthy" ~ 1))
+
+meta.df <- meta.df %>%
+  dplyr::rename(DSO = Days_since_symptom_onset) %>%
+  mutate(Obesity = as.character(Obesity)) %>%
+  mutate(Obesity = case_when(is.na(Obesity) == T ~ "NA",
+                             TRUE ~ Obesity)) %>%
+  mutate(Obesity = factor(Obesity, levels = c("Yes", "No", "NA")))
+
+
+
+```
+
+
+
+
+```{r Pairwise interactions, echo = FALSE, message = FALSE, warning  = FALSE, eval = F}
+# Main plots
+p1 <- meta.df %>%
+  ggplot(aes(y = Severity, x = Age)) +
+  geom_point(size = 1, alpha = 0.75, shape = 21, fill = "white") +
+  geom_smooth(method = "lm", se = F, colour = "red") +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(1, 2, 3, 4)) +
+  coord_cartesian(#xlim = c(5, 20), 
+                  ylim = c(0.9, 4.6)) +
+  stat_cor(method = "spearman", size = 6.5 / (14/5), label.y = 4.4) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+
+p2.test <- meta.df %>%
+  compare_means(Severity ~ Sex, data = .) %>%
+  mutate(y.position = c(4.4)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p2 <- meta.df %>%
+  ggplot(aes(y = Severity, x = Sex)) +
+  geom_violin(outlier.shape = NA) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0.1) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(1, 2, 3, 4)) +
+  coord_cartesian( 
+    ylim = c(0.9, 4.6)) +
+  stat_pvalue_manual(p2.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p3.test <- meta.df %>%
+  compare_means(Severity ~ Obesity, data = .) %>%
+  mutate(y.position = c(4.2, 4.4, 4.6)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p3 <- meta.df %>%
+  ggplot(aes(y = Severity, x = Obesity)) +
+  geom_violin(outlier.shape = NA, width = 1.3) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0.1) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(1, 2, 3, 4)) +
+  coord_cartesian(#xlim = c(5, 20), 
+    ylim = c(0.9, 4.6)) +
+  stat_pvalue_manual(p3.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p4 <- meta.df %>%
+  ggplot(aes(y = Severity, x = DSO)) +
+  geom_point(size = 1, alpha = 0.75, shape = 21, fill = "white") +
+  geom_smooth(method = "lm", se = F, colour = "red") +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(1, 2, 3, 4)) +
+  scale_x_continuous(breaks=c(0, 20, 40, 60)) +
+  coord_cartesian(xlim = c(0, 87), 
+    ylim = c(0.9, 4.6)) +
+  stat_cor(method = "spearman", size = 6.5 / (14/5),  label.y = 4.4) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p5.test <- meta.df %>%
+  compare_means(Age ~ Sex, data = .) %>%
+  mutate(y.position = c(84)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p5 <- meta.df %>%
+  ggplot(aes(y = Age, x = Sex)) +
+  geom_violin(outlier.shape = NA) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(20, 40, 60, 80)) +
+  coord_cartesian(
+    ylim = c(15, 88)) +
+  stat_pvalue_manual(p5.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p6.test <- meta.df %>%
+  compare_means(Age ~ Obesity, data = .) %>%
+  mutate(y.position = c(80, 84, 88)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p6 <- meta.df %>%
+  ggplot(aes(y = Age, x = Obesity)) +
+  geom_violin(outlier.shape = NA) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(20, 40, 60, 80)) +
+  coord_cartesian(
+    ylim = c(15, 88)) +
+  stat_pvalue_manual(p6.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p7 <- meta.df %>%
+  group_by(Sex, Obesity) %>%
+  dplyr::summarize(n = n()) %>%
+  ungroup() %>%
+  mutate(N_size = cut(n, breaks=c(-Inf, 10, 20, 30, 40, 50, 60, Inf), label=c(10, 20, 30, 40, 50, 60, 70))) %>%
+  ggplot(aes(y = Sex, x = Obesity, size = N_size)) +
+  geom_point(alpha = 1, shape = 21, fill = "white") +
+  geom_text(aes(label = n), size = 6.5 / (14/5)) +
+  theme_bw() + 
+  scale_size_manual(values = c(1,2,3,4,5,6) * 5, guide="none") +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+
+p8 <- meta.df %>%
+  ggplot(aes(y = Age, x = DSO)) +
+  geom_point(size = 1, alpha = 0.75, shape = 21, fill = "white") +
+  geom_smooth(method = "lm", se = F, colour = "red") +
+  theme_bw() + 
+  stat_cor(method = "spearman", size = 6.5 / (14/5), label.y = 84) + 
+  scale_y_continuous(breaks=c(20, 40, 60, 80)) +
+  scale_x_continuous(breaks=c(0, 20, 40, 60)) +
+  coord_cartesian(xlim = c(0, 87),
+    ylim = c(15, 88)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+
+
+p9.test <- meta.df %>%
+  compare_means(DSO ~ Sex, data = .) %>%
+  mutate(y.position = c(82)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p9 <- meta.df %>%
+  ggplot(aes(y = DSO, x = Sex)) +
+  geom_violin(outlier.shape = NA) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(0, 20, 40, 60)) +
+  coord_flip(ylim = c(0, 87)) +
+  stat_pvalue_manual(p9.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+p10.test <- meta.df %>%
+  compare_means(DSO ~ Obesity, data = .) %>%
+  mutate(y.position = c(77, 82, 87)) %>%
+  mutate(stars = cut(p, breaks=c(-Inf, 0.001, 0.01, 0.05, Inf), label=c("***", "**", "*", "ns")))
+
+p10 <- meta.df %>%
+  ggplot(aes(y = DSO, x = Obesity)) +
+  geom_violin(outlier.shape = NA) +
+  geom_jitter(size = 1, alpha = 0.75, shape = 21, fill = "white", width = 0.1, height = 0) +
+  theme_bw() + 
+  scale_y_continuous(breaks=c(0, 20, 40, 60)) +
+  coord_flip(ylim = c(0, 87)) +
+  stat_pvalue_manual(p10.test, label = "stars", tip.length = 0, size = 6.5 / (14/5)) +
+  theme(axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank())
+
+
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+p9
+p10
+
+# ggsave(plot = p10,
+#          file = paste("p10", ".pdf", sep=""),
+#          path = "/Users/joshgillard/Desktop/",
+#          width = 4,
+#          height = 4,
+#          units = "cm",
+#          device = "pdf",
+#          useDingbats = FALSE)
+
+
+# Axis labels
+p1.labs <- p1 + theme(axis.text.y = element_text(size = 6.5),
+        axis.text.x = element_text(size = 6.5),
+        axis.title = element_blank())
+
+# ggsave(plot = p1.labs,
+#          file = paste("p1.labs", ".pdf", sep=""),
+#          path = "/Users/joshgillard/Desktop/",
+#          width = 4,
+#          height = 4,
+#          units = "cm",
+#          device = "pdf",
+#          useDingbats = FALSE)
+
+p5.labs <- p5 + theme(axis.text.y = element_text(size = 6.5),
+        axis.text.x = element_text(size = 6.5),
+        axis.title = element_blank(),
+        axis.ticks = element_line())
+
+# ggsave(plot = p5.labs,
+#          file = paste("p5.labs", ".pdf", sep=""),
+#          path = "/Users/joshgillard/Desktop/",
+#          width = 4,
+#          height = 4,
+#          units = "cm",
+#          device = "pdf",
+#          useDingbats = FALSE)
+
+
+p7.labs <- p7 + theme(axis.text.y = element_text(size = 6.5),
+        axis.text.x = element_text(size = 6.5),
+        axis.title = element_blank(),
+        axis.ticks = element_line())
+
+# ggsave(plot = p7.labs,
+#          file = paste("p7.labs", ".pdf", sep=""),
+#          path = "/Users/joshgillard/Desktop/",
+#          width = 4,
+#          height = 4,
+#          units = "cm",
+#          device = "pdf",
+#          useDingbats = FALSE)
+
+p10.labs <- p10 + theme(axis.text.y = element_text(size = 6.5),
+        axis.text.x = element_text(size = 6.5),
+        axis.title = element_blank(),
+        axis.ticks = element_line())
+
+# ggsave(plot = p10.labs,
+#          file = paste("p10.labs", ".pdf", sep=""),
+#          path = "/Users/joshgillard/Desktop/",
+#          width = 4,
+#          height = 4,
+#          units = "cm",
+#          device = "pdf",
+#          useDingbats = FALSE)
+
+
+```
+
+```{r covariates corr, echo = FALSE, message = FALSE, warning  = FALSE, eval = T}
+
+ethnicity.df <- read.csv("/Users/jgillard/Desktop/Bioinformatics/Multiomic COVID19/Multiomics_covariates/Ethnicity.csv", na.strings = "NA", stringsAsFactors = T) %>%
+  mutate(sampleID = as.character(sampleID)) %>% # Dummy encode severity labels for regression analysis
+  mutate(Severity = case_when(Severity == "Severe" ~ 4,
+                              Severity == "Moderate" ~ 3,
+                              Severity == "Mild" ~ 2,
+                              Severity == "Healthy" ~ 1)) %>%
+  mutate(Hispanic = case_when(EthnicityHispanicLatino == "No" ~ 0,
+                              EthnicityHispanicLatino == "Yes" ~ 1)) %>%
+  dplyr::select(sampleID, Hispanic)
+
+
+meta.df <- meta.df %>%
+  full_join(., ethnicity.df, by = "sampleID") %>%
+  mutate(Sex = case_when(Sex == "M" ~ 0,
+                         Sex == "F" ~ 1)) %>%
+  mutate(Obesity = case_when(Obesity == "No" ~ 0,
+                             Obesity == "Yes" ~ 1)) %>%
+  dplyr::select(sampleID, Severity, Age, Sex, Hispanic, Obesity, DSO)
+  
+
+
+coef.mat <- meta.df %>%
+  dplyr::select(-sampleID) %>%
+  cor(., method = "pearson", use = "pairwise.complete.obs")
+p.mat <- meta.df %>%
+  dplyr::select(-sampleID) %>%
+  cor.mtest(., method = "pearson", use = "pairwise.complete.obs")
+
+
+corrplot(coef.mat, p.mat = p.mat , 
+         method = 'square', type = 'lower', insig='blank', 
+         number.cex = 0, 
+         order = 'AOE', 
+         diag=FALSE, 
+         col = rev(brewer.pal(n = 10, name = 'RdBu')),
+         tl.col = 'black')
+
+```
+
+
+
+
+
+
